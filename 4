@@ -1,0 +1,49 @@
+def inference(
+    cfg,
+    vae,
+    image_enc,
+    model,
+    scheduler,
+    ref_image_pil,
+    guidance_pil_group,
+    video_length,
+    width,
+    height,
+    device="cuda",
+    dtype=torch.float16,
+):
+    reference_unet = model.reference_unet
+    denoising_unet = model.denoising_unet
+    guidance_encoder_group = {
+        f"guidance_encoder_{g}": getattr(model, f"guidance_encoder_{g}")
+        for g in cfg.guidance_types
+    }
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(cfg.seed)
+    pipeline = MultiGuidance2LongVideoPipeline(
+        vae=vae,
+        image_encoder=image_enc,
+        reference_unet=reference_unet,
+        denoising_unet=denoising_unet,
+        **guidance_encoder_group,
+        scheduler=scheduler,
+        guidance_process_size=cfg.data.get("guidance_process_size", None)
+    )
+    pipeline = pipeline.to(device, dtype)
+
+    video = pipeline(
+        ref_image_pil,
+        guidance_pil_group,
+        width,
+        height,
+        video_length,
+        num_inference_steps=cfg.num_inference_steps,
+        guidance_scale=cfg.guidance_scale,
+        generator=generator,
+    ).videos
+
+    del pipeline
+    torch.cuda.empty_cache()
+
+    return video
