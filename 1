@@ -1,0 +1,54 @@
+class UNet3DConditionModel(ModelMixin, ConfigMixin):
+    _supports_gradient_checkpointing = True
+
+    @register_to_config
+    def __init__(
+        self,
+        sample_size: Optional[int] = None,
+        in_channels: int = 4,
+        out_channels: int = 4,
+        center_input_sample: bool = False,
+        flip_sin_to_cos: bool = True,
+        freq_shift: int = 0,
+        down_block_types: Tuple[str] = (
+            "CrossAttnDownBlock3D",
+            "CrossAttnDownBlock3D",
+            "CrossAttnDownBlock3D",
+            "DownBlock3D",
+        ),
+        mid_block_type: str = "UNetMidBlock3DCrossAttn",
+        up_block_types: Tuple[str] = (
+            "UpBlock3D",
+            "CrossAttnUpBlock3D",
+            "CrossAttnUpBlock3D",
+            "CrossAttnUpBlock3D",
+        ),
+        only_cross_attention: Union[bool, Tuple[bool]] = False,
+        block_out_channels: Tuple[int] = (320, 640, 1280, 1280),
+        layers_per_block: int = 2,
+        downsample_padding: int = 1,
+        mid_block_scale_factor: float = 1,
+        act_fn: str = "silu",
+        norm_num_groups: int = 32,
+        norm_eps: float = 1e-5,
+        cross_attention_dim: int = 1280,
+        attention_head_dim: Union[int, Tuple[int]] = 8,
+        dual_cross_attention: bool = False,
+        use_linear_projection: bool = False,
+        class_embed_type: Optional[str] = None,
+        num_class_embeds: Optional[int] = None,
+        upcast_attention: bool = False,
+        resnet_time_scale_shift: str = "default",
+        use_inflated_groupnorm=False,
+        # Additional
+        use_motion_module=False,
+        motion_module_resolutions=(1, 2, 4, 8),
+        motion_module_mid_block=False,
+        motion_module_decoder_only=False,
+        motion_module_type=None,
+        motion_module_kwargs={},
+        unet_use_cross_frame_attention=None,
+        unet_use_temporal_attention=None,
+    ):
+        super().__init__()
+        ...
