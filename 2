@@ -1,0 +1,134 @@
+for epoch in range(first_epoch, num_train_epochs):
+    train_loss = 0.0
+    for _, batch in enumerate(train_dataloader):
+        with accelerator.accumulate(model):
+            # Convert videos to latent space
+            pixel_values_vid = batch["tgt_vid"].to(weight_dtype)
+            with torch.no_grad():
+                video_length = pixel_values_vid.shape[1]
+                pixel_values_vid = rearrange(
+                    pixel_values_vid, "b f c h w -> (b f) c h w"
+                )
+                latents = vae.encode(pixel_values_vid).latent_dist.sample()
+                latents = rearrange(
+                    latents, "(b f) c h w -> b c f h w", f=video_length
+                )
+                latents = latents * 0.18215
+
+            noise = torch.randn_like(latents)
+            if cfg.noise_offset > 0:
+                noise += cfg.noise_offset * torch.randn(
+                    (latents.shape[0], latents.shape[1], 1, 1, 1),
+                    device=latents.device,
+                )
+            bsz = latents.shape[0]
+            # Sample a random timestep for each video
+            timesteps = torch.randint(
+                0,
+                train_noise_scheduler.num_train_timesteps,
+                (bsz,),
+                device=latents.device,
+            )
+            timesteps = timesteps.long()
+
+            tgt_guid_videos = batch["tgt_guid_vid"]  # (bs, f, c, H, W)
+            tgt_guid_videos = tgt_guid_videos.transpose(
+                1, 2
+            )  # (bs, c, f, H, W)
+
+            uncond_fwd = random.random() < cfg.uncond_ratio
+            clip_image_list = []
+            ref_image_list = []
+            for batch_idx, (ref_img, clip_img) in enumerate(
+                zip(
+                    batch["ref_img"],
+                    batch["clip_img"],
+                )
+            ):
+                if uncond_fwd:
+                    clip_image_list.append(torch.zeros_like(clip_img))
+                else:
+                    clip_image_list.append(clip_img)
+                ref_image_list.append(ref_img)
+
+            with torch.no_grad():
+                ref_img = torch.stack(ref_image_list, dim=0).to(
+                    dtype=vae.dtype, device=vae.device
+                )
+                ref_image_latents = vae.encode(
+                    ref_img
+                ).latent_dist.sample()  # (bs, d, 64, 64)
+                ref_image_latents = ref_image_latents * 0.18215
+
+                clip_img = torch.stack(clip_image_list, dim=0).to(
+                    dtype=image_enc.dtype, device=image_enc.device
+                )
+                clip_img = clip_img.to(device="cuda", dtype=weight_dtype)
+                clip_image_embeds = image_enc(
+                    clip_img.to("cuda", dtype=weight_dtype)
+                ).image_embeds
+                clip_image_embeds = clip_image_embeds.unsqueeze(1)  # (bs, 1, d)
+
+            # add noise
+            noisy_latents = train_noise_scheduler.add_noise(
+                latents, noise, timesteps
+            )
+
+            # Get the target for loss depending on the prediction type
+            if train_noise_scheduler.prediction_type == "epsilon":
+                target = noise
+            elif train_noise_scheduler.prediction_type == "v_prediction":
+                target = train_noise_scheduler.get_velocity(
+                    latents, noise, timesteps
+                )
+            else:
+                raise ValueError(
+                    f"Unknown prediction type {train_noise_scheduler.prediction_type}"
+                )
+
+            model_pred = model(
+                noisy_latents,
+                timesteps,
+                ref_image_latents,
+                clip_image_embeds,
+                tgt_guid_videos,
+                uncond_fwd=uncond_fwd,
+            )
+
+            if cfg.snr_gamma == 0:
+                loss = F.mse_loss(
+                    model_pred.float(), target.float(), reduction="mean"
+                )
+            else:
+                snr = compute_snr(train_noise_scheduler, timesteps)
+                if train_noise_scheduler.config.prediction_type == "v_prediction":
+                    # Velocity objective requires that we add one to SNR values before we divide by them.
+                    snr = snr + 1
+                mse_loss_weights = (
+                    torch.stack(
+                        [snr, cfg.snr_gamma * torch.ones_like(timesteps)], dim=1
+                    ).min(dim=1)[0]
+                    / snr
+                )
+                loss = F.mse_loss(
+                    model_pred.float(), target.float(), reduction="none"
+                )
+                loss = (
+                    loss.mean(dim=list(range(1, len(loss.shape))))
+                    * mse_loss_weights
+                )
+                loss = loss.mean()
+
+            avg_loss = accelerator.gather(loss.repeat(cfg.data.train_bs)).mean()
+            train_loss += avg_loss.item() / cfg.solver.gradient_accumulation_steps
+
+            # Backpropagate
+            accelerator.backward(loss)
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(
+                    trainable_params,
+                    cfg.solver.max_grad_norm,
+                )
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
